@@ -1,0 +1,506 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>SQLite Query to CSV (Fixed Query, Worker)</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        body {
+            font-family: 'Inter', sans-serif;
+        }
+        .container {
+            margin-top: 2rem;
+            padding: 1rem;
+            border-radius: 0.5rem;
+            border: 1px solid #e5e7eb;
+            box-shadow: 0 1px 3px 0 rgba(0, 0, 0, 0.1), 0 1px 2px -1px rgba(0, 0, 0, 0.1);
+            position: relative; /* Needed for absolute positioning of loader */
+        }
+        #results {
+            margin-top: 1rem;
+            border: 1px solid #e5e7eb;
+            border-radius: 0.5rem;
+            overflow-x: auto;
+            max-height: 400px; /* Add max height for scrollable results */
+        }
+        #results table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+        #results th, #results td {
+            padding: 0.75rem;
+            border-bottom: 1px solid #f3f4f6;
+            text-align: left;
+            vertical-align: middle;
+            white-space: nowrap;
+        }
+        #results th {
+            background-color: #f9fafb;
+            font-weight: 600;
+            position: sticky;
+            top: 0;
+            z-index: 10;
+        }
+        #results td {
+            word-wrap: break-word;
+        }
+        #results tr:hover {
+            background-color: #f5f5f5;
+        }
+        .error-message {
+            color: #dc2626;
+            margin-top: 1rem;
+            padding: 0.75rem;
+            background-color: #fee2e2;
+            border-radius: 0.375rem;
+            border: 1px solid #fecaca;
+        }
+        #loading-indicator {
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background-color: rgba(255, 255, 255, 0.85); /* Slightly more opaque */
+            z-index: 50;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            border-radius: 0.5rem;
+        }
+        #loading-indicator p {
+            background-color: #4b5563;
+            color: white;
+            padding: 1rem 1.5rem;
+            border-radius: 0.375rem;
+            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -2px rgba(0, 0, 0, 0.1);
+        }
+    </style>
+</head>
+<body class="bg-gray-100">
+    <div class="container max-w-4xl mx-auto">
+        <div id="loading-indicator" class="hidden">
+            <p id="loading-message">Processing...</p>
+        </div>
+
+        <h1 class="text-2xl font-semibold text-gray-800 mb-4">SQLite Query to CSV Converter</h1>
+        <p class="text-gray-600 mb-4">Upload your SQLite file (.sqlite, .db, .sqlite3, .dlens) and click "Execute Query" to generate a CSV based on a predefined query. Processing large files may take some time.</p>
+
+        <div class="mb-4">
+            <label for="sqliteFile" class="inline-flex items-center justify-center px-5 py-3 bg-blue-600 text-white font-medium rounded-md shadow-md cursor-pointer hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-opacity-50 transition-colors">
+                <svg xmlns="http://www.w3.org/2000/svg" class="mr-2 h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-1l-5-5m0 0l-5 5m5-5v12" />
+                </svg>
+                <span>Upload SQLite File</span>
+                <input type="file" id="sqliteFile" accept=".sqlite,.db,.sqlite3,.dlens" class="hidden">
+            </label>
+            <p id="file-name" class="mt-2 text-sm text-gray-500"></p>
+            <div id="error-message" class="error-message hidden"></div>
+        </div>
+
+        <div class="flex space-x-4">
+            <button id="executeQuery" class="bg-green-500 hover:bg-green-700 text-white font-bold py-2 px-4 rounded focus:outline-none focus:shadow-outline disabled:opacity-50 disabled:cursor-not-allowed" disabled>Execute Query</button>
+            <button id="downloadCsv" class="bg-blue-500 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded focus:outline-none focus:shadow-outline disabled:opacity-50 disabled:cursor-not-allowed" disabled>Download CSV</button>
+        </div>
+
+        <div id="results" class="mt-6">
+            <h2 class="text-lg font-semibold text-gray-800 mb-2">Results:</h2>
+            <p class="text-gray-500 p-4">No results to display yet. Upload a file and execute the query.</p>
+        </div>
+    </div>
+
+    <script>
+    // --- HTML Element References ---
+    const sqliteFile = document.getElementById('sqliteFile');
+    const executeQueryButton = document.getElementById('executeQuery');
+    const downloadCsvButton = document.getElementById('downloadCsv');
+    const resultsContainer = document.getElementById('results');
+    const fileNameDisplay = document.getElementById('file-name');
+    const errorMessageDisplay = document.getElementById('error-message');
+    const loadingIndicator = document.getElementById('loading-indicator');
+    const loadingMessage = document.getElementById('loading-message');
+
+    // --- State Variables ---
+    let filename = "";
+    let csvBlob = null;
+    let isDbReady = false;
+    let worker = null;
+    let workerBlobUrl = null;
+
+    // --- Hardcoded SQL Query (used by the worker) ---
+    const fixedQuery = `
+        SELECT
+            cards.quantity as 'Count',
+            data_names.name as 'Name',
+            data_editions.name as 'Edition',
+            CASE
+              WHEN cards.condition = 'Moderately Played' THEN 'Played'
+              WHEN cards.condition = 'Near Mint' THEN 'Near Mint'
+              WHEN cards.condition = 'Slightly Played' THEN 'Lightly Played'
+              ELSE cards.condition
+            END AS 'Condition',
+            CASE
+              WHEN cards.foil = 0 THEN ''
+              WHEN cards.foil = 1 THEN 'foil'
+              ELSE ''
+            END AS 'Foil',
+            cards.language as 'Language',
+            data_cards.number as 'Collector Number'
+        FROM cards
+        JOIN data_cards ON cards.card = data_cards._id
+        JOIN data_names ON data_cards.name = data_names._id
+        JOIN data_editions ON data_cards.edition = data_editions._id;
+    `;
+
+    // --- UI Helper Functions ---
+
+    function showLoading(message = "Processing...") {
+        console.log(`[Main] Showing loading: ${message}`);
+        loadingMessage.textContent = message;
+        loadingIndicator.classList.remove('hidden');
+        executeQueryButton.disabled = true; // Always disable buttons when loading
+        downloadCsvButton.disabled = true;
+    }
+
+    // Refined hideLoading: Always hides indicator, then sets button states
+    function hideLoading() {
+        console.log("[Main] Hiding loading indicator.");
+        loadingIndicator.classList.add('hidden');
+        // Set button states based on current application state
+        executeQueryButton.disabled = !isDbReady;
+        downloadCsvButton.disabled = !csvBlob;
+        console.log(`[Main] Buttons updated: Execute=${executeQueryButton.disabled}, Download=${downloadCsvButton.disabled}`);
+    }
+
+    function displayErrorMessage(message) {
+        errorMessageDisplay.textContent = message;
+        errorMessageDisplay.classList.remove('hidden');
+        console.error("[Main] Error displayed:", message);
+        isDbReady = false; // Reset state on error
+        csvBlob = null;
+        hideLoading(); // Hide loading and update button states
+    }
+
+    function hideErrorMessage() {
+        errorMessageDisplay.classList.add('hidden');
+        errorMessageDisplay.textContent = '';
+    }
+
+    function displayResults(columns, values) {
+        console.log("[Main] Displaying results table.");
+        let html = '<table class="min-w-full divide-y divide-gray-200">';
+        html += '<thead class="bg-gray-50"><tr>';
+        columns.forEach(column => {
+            html += `<th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">${column}</th>`;
+        });
+        html += '</tr></thead><tbody class="bg-white divide-y divide-gray-200">';
+        if (values.length === 0) {
+             html += `<tr><td colspan="${columns.length}" class="px-6 py-4 whitespace-nowrap text-sm text-gray-500 text-center">No results found for this query.</td></tr>`;
+        } else {
+            // Display only first 100 rows for performance in browser view
+            const displayLimit = 100;
+            const limitedValues = values.slice(0, displayLimit);
+            limitedValues.forEach(row => {
+                html += '<tr>';
+                row.forEach(value => {
+                    const displayValue = (value === null || value === undefined) ? '' : value;
+                    const escapedValue = String(displayValue).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+                    html += `<td class="px-6 py-4 whitespace-nowrap text-sm text-gray-900">${escapedValue}</td>`;
+                });
+                html += '</tr>';
+            });
+             if (values.length > displayLimit) {
+                 html += `<tr><td colspan="${columns.length}" class="px-6 py-4 whitespace-nowrap text-sm text-gray-500 text-center italic">Showing first ${displayLimit} of ${values.length} results. Full results in downloaded CSV.</td></tr>`;
+            }
+        }
+        html += '</tbody></table>';
+        resultsContainer.innerHTML = html;
+    }
+
+    // --- Worker Setup ---
+
+    const workerCode = `
+        console.log("[Worker] Script started.");
+        // Import the sql.js library
+        self.importScripts('https://cdnjs.cloudflare.com/ajax/libs/sql.js/1.9.0/sql-wasm.js');
+
+        let db = null;
+        let SQLModule = null; // Hold the SQL module itself
+        const fixedQuery = \`${fixedQuery}\`;
+
+        console.log("[Worker] Initializing SQL.js...");
+        self.initSqlJs({ locateFile: file => \`https://cdnjs.cloudflare.com/ajax/libs/sql.js/1.9.0/\${file}\` }).then(SQL => {
+            console.log("[Worker] SQL.js initialized successfully.");
+            SQLModule = SQL; // Store the initialized module
+            self.postMessage({ type: 'workerReady' });
+        }).catch(error => {
+            console.error("[Worker] SQL.js init error:", error);
+            self.postMessage({ type: 'error', message: 'Failed to initialize SQL library in worker: ' + error.message });
+        });
+
+        self.onmessage = function(event) {
+            const { type, buffer } = event.data;
+            console.log("[Worker] Received message:", type);
+
+            if (type === 'loadFile') {
+                if (!SQLModule) {
+                     console.error("[Worker] SQL library not initialized when trying to load file.");
+                     self.postMessage({ type: 'error', message: 'SQL library not initialized yet.' });
+                     return;
+                }
+                db = null; // Reset DB
+                self.postMessage({ type: 'status', message: 'Loading database...' });
+                console.log("[Worker] Loading database from buffer...");
+                try {
+                    db = new SQLModule.Database(new Uint8Array(buffer));
+                    console.log("[Worker] Database loaded successfully.");
+                    self.postMessage({ type: 'dbReady' }); // Signal DB is ready
+                } catch (error) {
+                    console.error("[Worker] DB load error:", error);
+                    db = null;
+                    self.postMessage({ type: 'error', message: 'Failed to load database: ' + error.message });
+                }
+            } else if (type === 'executeQuery') {
+                if (!db) {
+                    console.error("[Worker] Execute query called but DB not loaded.");
+                    self.postMessage({ type: 'error', message: 'Database not loaded yet.' });
+                    return;
+                }
+                self.postMessage({ type: 'status', message: 'Executing query...' });
+                console.log("[Worker] Executing fixed query...");
+                try {
+                    const results = db.exec(fixedQuery);
+                    console.log("[Worker] Query executed.");
+                    let columns = [];
+                    let values = [];
+                    let csvContent = '';
+                    let csvBlob = null;
+
+                    if (results && results.length > 0) {
+                        columns = results[0].columns;
+                        values = results[0].values;
+                        console.log(\`[Worker] Query returned \${values.length} rows.\`);
+
+                        self.postMessage({ type: 'status', message: 'Generating CSV...' });
+                        console.log("[Worker] Generating CSV...");
+                        // Header row
+                        csvContent += columns.map(col => \`"\${String(col).replace(/"/g, '""')}"\`).join(',') + '\\n';
+                        // Data rows
+                        values.forEach(row => {
+                            csvContent += row.map(value => {
+                                const strValue = (value === null || value === undefined) ? '' : String(value);
+                                return \`"\${strValue.replace(/"/g, '""')}"\`;
+                            }).join(',') + '\\n';
+                        });
+                        csvBlob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+                        console.log("[Worker] CSV Blob created.");
+                    } else {
+                         console.log("[Worker] Query returned no results.");
+                         self.postMessage({ type: 'status', message: 'Query returned no results.' });
+                    }
+
+                    console.log("[Worker] Sending results back to main thread.");
+                    self.postMessage({
+                        type: 'results',
+                        columns: columns,
+                        values: values, // Send all values for potential preview limiting in main thread
+                        blob: csvBlob
+                    });
+
+                } catch (error) {
+                    console.error("[Worker] Query execution/CSV generation error:", error);
+                    self.postMessage({ type: 'error', message: 'Error executing query or generating CSV: ' + error.message });
+                }
+            }
+        };
+    `;
+
+    try {
+        console.log("[Main] Creating worker...");
+        const workerBlob = new Blob([workerCode], { type: 'application/javascript' });
+        workerBlobUrl = URL.createObjectURL(workerBlob);
+        worker = new Worker(workerBlobUrl);
+        console.log("[Main] Worker created.");
+
+        // --- Worker Message Handling ---
+        worker.onmessage = function(event) {
+            console.log("[Main] Received message from worker:", event.data); // Log the whole message
+            const { type, message, columns, values, blob } = event.data;
+
+            switch (type) {
+                case 'workerReady':
+                    console.log("[Main] Worker signaled ready.");
+                    // Nothing to do visually, wait for file load
+                    break;
+                case 'dbReady':
+                    console.log("[Main] Worker signaled DB ready.");
+                    isDbReady = true;
+                    hideLoading(); // Hide loader, enable Execute button
+                    break;
+                case 'status':
+                    console.log("[Main] Worker status update:", message);
+                    showLoading(message); // Update loading message text
+                    break;
+                case 'results':
+                    console.log("[Main] Worker sent results.");
+                    csvBlob = blob; // Store the blob
+                    if (columns && values) {
+                        displayResults(columns, values); // Display preview
+                    } else {
+                         resultsContainer.innerHTML = '<p class="text-gray-500 p-4">Query executed successfully, but no results were returned.</p>';
+                    }
+                    isDbReady = true; // Ensure DB is still considered ready
+                    hideLoading(); // Hide loader, enable buttons based on state
+                    break;
+                case 'error':
+                    console.error("[Main] Worker reported error:", message);
+                    displayErrorMessage(message); // Show error, hide loader, disable buttons
+                    break;
+                default:
+                    console.warn("[Main] Unknown message type from worker:", type);
+                    hideLoading(); // Hide loader as a fallback for unknown messages
+            }
+        };
+
+        worker.onerror = function(error) {
+            console.error("[Main] Worker onerror event:", error);
+            displayErrorMessage(`Worker error: ${error.message || 'Unknown worker error'}`);
+            // Clean up worker if it crashes
+             if (worker) {
+                 worker.terminate();
+                 worker = null;
+                 console.log("[Main] Worker terminated due to error.");
+             }
+             if (workerBlobUrl) {
+                 URL.revokeObjectURL(workerBlobUrl);
+                 workerBlobUrl = null;
+             }
+        };
+
+    } catch (error) {
+         console.error("[Main] Failed to create worker:", error);
+         displayErrorMessage("Could not initialize background processing. Your browser might not support Web Workers or Blob URLs.");
+         // Disable functionality if worker fails to initialize
+         sqliteFile.disabled = true; // Disable file input too
+         executeQueryButton.disabled = true;
+         downloadCsvButton.disabled = true;
+    }
+
+
+    // --- Event Listeners (Main Thread) ---
+
+    sqliteFile.addEventListener('change', function(event) {
+        console.log("[Main] File input changed.");
+        const file = event.target.files[0];
+        hideErrorMessage();
+        resultsContainer.innerHTML = '<p class="text-gray-500 p-4">No results to display yet. Upload a file and execute the query.</p>';
+        // Reset state for new file
+        downloadCsvButton.disabled = true;
+        executeQueryButton.disabled = true;
+        csvBlob = null;
+        isDbReady = false;
+
+        if (!file) {
+            fileNameDisplay.textContent = '';
+            console.log("[Main] No file selected.");
+            return;
+        }
+
+        if (!worker) {
+            displayErrorMessage("Processing worker is not available.");
+            return;
+        }
+
+        filename = file.name;
+        fileNameDisplay.textContent = `Selected file: ${filename}`;
+        showLoading("Reading file...");
+
+        const reader = new FileReader();
+        reader.onload = function(e) {
+            showLoading("Sending file to processor...");
+            const arrayBuffer = e.target.result;
+            try {
+                // Post message to worker, transferring the buffer
+                worker.postMessage({ type: 'loadFile', buffer: arrayBuffer }, [arrayBuffer]);
+                console.log("[Main] Sent 'loadFile' message to worker.");
+            } catch (transferError) {
+                 console.error("[Main] Error transferring buffer to worker:", transferError);
+                 // If transfer fails, try cloning (slower, uses more memory)
+                 try {
+                     worker.postMessage({ type: 'loadFile', buffer: e.target.result });
+                     console.log("[Main] Sent 'loadFile' message to worker (cloned).");
+                 } catch (postError){
+                     console.error("[Main] Error posting message to worker:", postError);
+                     displayErrorMessage(`Failed to send file to processor: ${postError.message}`);
+                 }
+            }
+        };
+        reader.onerror = function() {
+            console.error("[Main] FileReader error.");
+            displayErrorMessage('Error reading the file.');
+            hideLoading(); // Ensure loading is hidden on reader error
+        };
+        reader.readAsArrayBuffer(file);
+    });
+
+    executeQueryButton.addEventListener('click', function() {
+        console.log("[Main] Execute Query button clicked.");
+        if (!isDbReady) {
+             displayErrorMessage('Database is not ready. Please wait or upload a valid file.');
+             return;
+        }
+        if (!worker) {
+             displayErrorMessage("Processing worker is not available.");
+             return;
+        }
+        hideErrorMessage();
+        showLoading("Executing query...");
+        csvBlob = null; // Reset blob before new execution
+        downloadCsvButton.disabled = true; // Disable download until new blob arrives
+        worker.postMessage({ type: 'executeQuery' });
+        console.log("[Main] Sent 'executeQuery' message to worker.");
+    });
+
+    downloadCsvButton.addEventListener('click', function() {
+        console.log("[Main] Download CSV button clicked.");
+        if (!csvBlob) {
+             displayErrorMessage('No CSV data available to download. Please execute the query first.');
+             return;
+        }
+        hideErrorMessage();
+        console.log("[Main] Creating download link for CSV Blob.");
+        try {
+            const url = URL.createObjectURL(csvBlob);
+            const link = document.createElement("a");
+            link.setAttribute('href', url);
+            const csvFilename = filename.replace(/\.[^/.]+$/, "") + "_query_results.csv";
+            link.setAttribute('download', csvFilename);
+            link.style.visibility = 'hidden';
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+            URL.revokeObjectURL(url);
+            console.log("[Main] Download triggered for:", csvFilename);
+
+        } catch (error) {
+            console.error("[Main] Error creating download link:", error);
+            displayErrorMessage(`Error creating download link: ${error.message}`);
+        }
+    });
+
+    // Clean up worker and Blob URL when the page is unloaded
+    window.addEventListener('unload', () => {
+        console.log("[Main] Page unloading. Terminating worker and revoking Blob URL.");
+        if (worker) {
+            worker.terminate();
+        }
+        if (workerBlobUrl) {
+            URL.revokeObjectURL(workerBlobUrl);
+        }
+    });
+
+    </script>
+    </body>
+</html>
