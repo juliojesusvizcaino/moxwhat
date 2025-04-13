@@ -204,7 +204,10 @@
         FROM cards
         JOIN data_cards ON cards.card = data_cards._id
         JOIN data_names ON data_cards.name = data_names._id
-        JOIN data_editions ON data_cards.edition = data_editions._id;
+        JOIN data_editions ON data_cards.edition = data_editions._id
+        JOIN lists ON cards.list = lists._id
+        WHERE lists.category = 1;
+
     `;
 
       // --- UI Helper Functions ---
