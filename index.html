@@ -200,7 +200,8 @@
               ELSE ''
             END AS 'Foil',
             cards.language as 'Language',
-            data_cards.number as 'Collector Number'
+            data_cards.number as 'Collector Number',
+            data_cards.scryfall_id as 'Scryfall ID'
         FROM cards
         JOIN data_cards ON cards.card = data_cards._id
         JOIN data_names ON data_cards.name = data_names._id
